@@ -108,9 +108,8 @@ pub fn analyse(prompt: &str, answer: &str) -> Result<Verdict, String> {
         clip(answer, 2000, 5000)
     );
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input.as_bytes())
-            .map_err(|e| format!("claude: {e}"))?;
+        // A claude that died early reports why on stderr, which is read below.
+        let _ = stdin.write_all(input.as_bytes());
     }
     let out = child
         .wait_with_output()

@@ -21,6 +21,8 @@ use crate::tmux::{self, Pane};
 use crate::{home, now_ms};
 
 const REFRESH: Duration = Duration::from_secs(1);
+/// How often the transcript of a working session is reread.
+const BUSY_REREAD: Duration = Duration::from_secs(5);
 /// How many chats Haiku reads at once.
 const MAX_RUNNING: usize = 3;
 
@@ -71,6 +73,7 @@ enum Analysis {
 struct Info {
     /// Transcript mtime and size the turn was read at.
     stamp: Option<(SystemTime, u64)>,
+    read_at: Option<Instant>,
     turn: Turn,
     analysis: Analysis,
 }
@@ -167,8 +170,6 @@ enum Mode {
 enum Action {
     None,
     Quit,
-    /// Hand the terminal over to tmux until the user detaches.
-    Attach(Pane),
 }
 
 struct App {
@@ -297,9 +298,11 @@ impl App {
         let stamp = fs::metadata(&s.transcript)
             .ok()
             .and_then(|m| Some((m.modified().ok()?, m.len())));
-        // A working session rewrites its transcript constantly; wait until it stops.
-        if stamp != info.stamp && (!busy || info.stamp.is_none()) {
+        // A working session rewrites its transcript constantly; follow it only loosely.
+        let due = info.read_at.is_none_or(|t| t.elapsed() >= BUSY_REREAD);
+        if stamp != info.stamp && (!busy || due) {
             info.stamp = stamp;
+            info.read_at = Some(Instant::now());
             let turn = sessions::read_turn(&s.transcript);
             if turn.key != info.turn.key {
                 info.analysis = Analysis::None;
@@ -359,9 +362,6 @@ impl App {
     }
 
     fn jump(&mut self, pane: Pane) -> Action {
-        if !tmux::inside() {
-            return Action::Attach(pane);
-        }
         match tmux::switch(&pane) {
             Ok(()) if self.once => return Action::Quit,
             Ok(()) => self.status = Some((format!("přepnuto na {}", pane.label), false)),
@@ -371,13 +371,12 @@ impl App {
     }
 
     fn start_in(&mut self, dir: &Path) -> Action {
-        match tmux::new_session(dir) {
-            Ok(pane) => self.jump(pane),
-            Err(e) => {
-                self.err(e);
-                Action::None
-            }
+        match tmux::new_window(dir) {
+            Ok(()) if self.once => return Action::Quit,
+            Ok(()) => self.status = Some((format!("spuštěno v {}", dir.display()), false)),
+            Err(e) => self.err(e),
         }
+        Action::None
     }
 
     fn on_key(&mut self, key: KeyCode, ctrl: bool) -> Action {
@@ -521,7 +520,7 @@ impl App {
             self.rows.len()
         );
         if self.rows.is_empty() {
-            let text = "Neběží žádná Claude Code session. Klávesa n spustí novou v tmuxu.";
+            let text = "Neběží žádná Claude Code session. Klávesa n spustí novou v novém okně.";
             let block = Block::bordered().title(title);
             f.render_widget(Paragraph::new(Line::styled(text, dim)).block(block), area);
             return;
@@ -661,17 +660,6 @@ impl App {
             match self.on_key(key.code, key.modifiers.contains(KeyModifiers::CONTROL)) {
                 Action::None => {}
                 Action::Quit => return Ok(()),
-                Action::Attach(pane) => {
-                    ratatui::restore();
-                    let result = tmux::attach(&pane);
-                    *term = ratatui::init();
-                    match result {
-                        Ok(()) if self.once => return Ok(()),
-                        Ok(()) => {}
-                        Err(e) => self.err(e),
-                    }
-                    refreshed = None;
-                }
             }
         }
     }
@@ -681,7 +669,7 @@ pub fn run(once: bool) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         once,
-        has_tmux: tmux::installed(),
+        has_tmux: tmux::inside(),
         rows: Vec::new(),
         infos: HashMap::new(),
         sel: 0,
@@ -691,8 +679,16 @@ pub fn run(once: bool) -> Result<(), String> {
         tx,
         rx,
     };
+    let home = tmux::Home::find();
+    if let Some(home) = &home {
+        home.show_way_back();
+    }
     let mut term = ratatui::init();
     let result = app.event_loop(&mut term);
     ratatui::restore();
+    // Our window closes with us; without this the terminal would land in some session.
+    if let Some(home) = &home {
+        home.detach();
+    }
     result.map_err(|e| format!("terminál: {e}"))
 }

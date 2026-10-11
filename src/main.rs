@@ -18,7 +18,9 @@ Použití:
 
 Sessions, které dostaly finální odpověď, přečte Haiku a podle výsledku je seřadí:
 potvrzení > otázka > problém > hotovo > odpověď > pracuje.
-Enter přepne do tmux panelu vybrané session, n spustí novou ve zvolené složce.
+Enter přepne do tmux panelu vybrané session, n spustí novou ve zvolené složce
+jako další okno vedle přehledu. Mimo tmux si přehled spustí vlastní tmux session
+\"claude-manager\"; q přehled zavře, sessions běží dál a další spuštění se k nim vrátí.
 
 Model pro analýzu určuje CLAUDE_MANAGER_MODEL (výchozí haiku).";
 
@@ -55,6 +57,11 @@ fn main() -> ExitCode {
     if !io::stdout().is_terminal() {
         eprintln!("error: claude-manager potřebuje terminál");
         return ExitCode::from(2);
+    }
+    // New sessions open as windows next to the manager, so it has to live in tmux.
+    if tmux::installed() && !tmux::inside() {
+        eprintln!("error: {}", tmux::enter());
+        return ExitCode::FAILURE;
     }
     match tui::run(once) {
         Ok(()) => ExitCode::SUCCESS,

@@ -2,15 +2,20 @@
 
 use std::env;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+/// The session the manager starts for itself when it is run outside tmux.
+const HOME_SESSION: &str = "claude-manager";
+/// The name of the manager's own window there.
+const HOME_WINDOW: &str = "manager";
 
 #[derive(Clone)]
 pub struct Pane {
     /// Unique pane id, e.g. `%3`.
     pub id: String,
     pub pid: u32,
-    pub session: String,
     /// `session:window.pane` as the user knows it.
     pub label: String,
 }
@@ -44,15 +49,13 @@ pub fn inside() -> bool {
     env::var_os("TMUX").is_some_and(|v| !v.is_empty())
 }
 
-const PANE_FORMAT: &str =
-    "#{pane_id}\t#{pane_pid}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}";
+const PANE_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}";
 
 fn parse_pane(line: &str) -> Option<Pane> {
     let mut f = line.split('\t');
     Some(Pane {
         id: f.next()?.to_string(),
         pid: f.next()?.parse().ok()?,
-        session: f.next()?.to_string(),
         label: f.next()?.to_string(),
     })
 }
@@ -88,49 +91,91 @@ pub fn switch(pane: &Pane) -> Result<(), String> {
     tmux(&["switch-client", "-t", &pane.id]).map(drop)
 }
 
-/// Attaches this terminal to the session of `pane`; returns once the user detaches.
-pub fn attach(pane: &Pane) -> Result<(), String> {
-    tmux(&["select-window", "-t", &pane.id])?;
-    tmux(&["select-pane", "-t", &pane.id])?;
-    let status = Command::new("tmux")
-        .args(["attach-session", "-t", &format!("={}", pane.session)])
-        .status()
-        .map_err(|e| format!("tmux: {e}"))?;
-    if !status.success() {
-        return Err("tmux attach selhal".into());
-    }
-    Ok(())
+/// Quotes `s` for the shell tmux runs commands with.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Starts `claude` in `dir` in a new detached session named after the directory.
-pub fn new_session(dir: &Path) -> Result<Pane, String> {
-    let base: String = dir
+/// Replaces this process with tmux showing the manager in its home session, starting
+/// either as needed. Returns only when that failed.
+pub fn enter() -> String {
+    let exe = match env::current_exe() {
+        Ok(exe) => sh_quote(&exe.to_string_lossy()),
+        Err(e) => return format!("nelze zjistit cestu k programu: {e}"),
+    };
+    let session = format!("={HOME_SESSION}");
+    let mut cmd = Command::new("tmux");
+    if tmux(&["has-session", "-t", &session]).is_ok() {
+        let windows = tmux(&[
+            "list-windows",
+            "-t",
+            &session,
+            "-F",
+            "#{window_name}\t#{window_id}",
+        ])
+        .unwrap_or_default();
+        let manager = windows
+            .lines()
+            .find_map(|l| l.strip_prefix(HOME_WINDOW)?.strip_prefix('\t'));
+        // The sessions outlive the manager; it rejoins them in a window of its own.
+        let placed = match manager {
+            Some(id) => tmux(&["select-window", "-t", id]),
+            None => tmux(&[
+                "new-window",
+                "-t",
+                &format!("{session}:"),
+                "-n",
+                HOME_WINDOW,
+                &exe,
+            ]),
+        };
+        if let Err(e) = placed {
+            return e;
+        }
+        cmd.args(["attach-session", "-t", &session]);
+    } else {
+        cmd.args(["new-session", "-s", HOME_SESSION, "-n", HOME_WINDOW, &exe]);
+    }
+    format!("tmux: {}", cmd.exec())
+}
+
+/// Our pane, when we run as the manager window of the home session.
+pub struct Home {
+    pane: String,
+}
+
+impl Home {
+    pub fn find() -> Option<Home> {
+        let pane = env::var("TMUX_PANE").ok()?;
+        let place = tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &pane,
+            "#{session_name}\t#{window_name}",
+        ])
+        .ok()?;
+        (place == format!("{HOME_SESSION}\t{HOME_WINDOW}")).then_some(Home { pane })
+    }
+
+    /// Shows in the session's status line how to get back to the manager.
+    pub fn show_way_back(&self) {
+        let index = tmux(&["display-message", "-p", "-t", &self.pane, "#{window_index}"]);
+        let hint = format!(" #{{prefix}} {} = přehled ", index.unwrap_or_default());
+        let _ = tmux(&["set-option", "-t", &self.pane, "status-right", &hint]);
+    }
+
+    /// Returns the terminal to the shell; the session and its windows keep running.
+    pub fn detach(&self) {
+        let _ = tmux(&["detach-client", "-s", &self.pane]);
+    }
+}
+
+/// Starts `claude` in `dir` in a new window of the session we run in and shows it.
+pub fn new_window(dir: &Path) -> Result<(), String> {
+    let name = dir
         .file_name()
-        .map_or("claude".into(), |n| n.to_string_lossy().into_owned())
-        .replace(['.', ':'], "_");
-    let taken = |name: &str| tmux(&["has-session", "-t", &format!("={name}")]).is_ok();
-    let name = (1..)
-        .map(|n| {
-            if n == 1 {
-                base.clone()
-            } else {
-                format!("{base}-{n}")
-            }
-        })
-        .find(|name| !taken(name))
-        .unwrap_or(base);
+        .map_or("claude".into(), |n| n.to_string_lossy().into_owned());
     let dir = dir.to_string_lossy();
-    let out = tmux(&[
-        "new-session",
-        "-d",
-        "-P",
-        "-F",
-        PANE_FORMAT,
-        "-s",
-        &name,
-        "-c",
-        &dir,
-        "claude",
-    ])?;
-    parse_pane(&out).ok_or_else(|| format!("tmux: nečekaný výstup {out:?}"))
+    tmux(&["new-window", "-n", &name, "-c", &dir, "claude"]).map(drop)
 }

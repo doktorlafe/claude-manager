@@ -7,7 +7,8 @@ the tmux pane of the one you pick.
 - finds every running interactive `claude` and the tmux pane it lives in
 - when a session receives its final answer, Haiku reads the end of the chat and
   classifies it; the list is sorted by the result
-- `Enter` takes you to the session, `n` starts a new one in a folder you pick
+- `Enter` takes you to the session, `n` starts a new one in a folder you pick,
+  as a tmux window next to the overview
 
 The interface and its messages are in Czech.
 
@@ -36,10 +37,10 @@ claude-manager
 | `Enter` | jump to the session's tmux pane |
 | `n` | start a new session: opens a folder browser |
 | `a` | have Haiku read the selected chat again |
-| `q` | quit |
+| `q` | quit (sessions keep running) |
 
 In the folder browser `Enter`/`→` opens a folder, `←` goes up, `Space` starts
-`claude` in the highlighted folder (in a new tmux session named after it) and
+`claude` in the highlighted folder (in a new tmux window named after it) and
 `.` shows hidden folders.
 
 The lower pane shows the selected session's last prompt and the end of its
@@ -70,13 +71,18 @@ your existing login and needs no API key. Verdicts are cached in
 
 ## Jumping
 
-Started **outside tmux**, `Enter` attaches the terminal to the session; detach
-(`Ctrl+b d`) and you are back in the list. This is the simplest way to use it:
-the manager is home, every session is one `Enter` away.
+Started **outside tmux**, the manager starts a tmux session named
+`claude-manager` and runs in its first window. Sessions started with `n` are
+further windows of it, so everything stays in one place: `Enter` shows a
+session, and the status line reminds you of the key that brings the overview
+back (`Ctrl+b 0` by default). `q` closes the overview and returns you to the
+shell, but the sessions keep running; run `claude-manager` again to rejoin them.
 
-Started **inside tmux**, `Enter` switches the client to that pane and the
-manager keeps running in its own window (`Ctrl+b L` returns to it). It also
-works as a popup that closes after the jump; add to `~/.tmux.conf`:
+Started **inside tmux**, the manager stays in the window it was started in.
+`n` opens the new session as a window of that tmux session and `Enter` switches
+the client to the chosen pane, wherever it is (`Ctrl+b l` returns to the last
+window, `Ctrl+b L` to the last session). It also works as a popup that closes
+after the jump; add to `~/.tmux.conf`:
 
 ```
 bind m display-popup -E -w 90% -h 90% "claude-manager --once"
